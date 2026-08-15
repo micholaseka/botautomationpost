@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Marketplace AutoPost</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="app">
+        <header class="app-header">
+            <div class="header-left">
+                <div class="logo">
+                    <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+                        <circle cx="8.5" cy="8.5" r="1.5"/>
+                        <polyline points="21 15 16 10 5 21"/>
+                    </svg>
+                </div>
+                <div class="header-text">
+                    <h1>Marketplace AutoPost Bot</h1>
+                    <span class="version">AUTOMATION CONSOLE · v1.1.0</span>
+                </div>
+            </div>
+            <div class="header-right">
+                <span class="status-badge" id="statusBadge">
+                    <span class="status-dot" id="statusDot"></span>
+                    <span id="statusText">Siap</span>
+                </span>
+            </div>
+        </header>
+
+        <main class="main-content">
+            <div class="content-grid">
+                <section class="form-section">
+                    <div class="hero-panel">
+                        <div>
+                            <span class="eyebrow">MARKETPLACE WORKSPACE</span>
+                            <h2>Siapkan listing, lalu biarkan alurnya bekerja.</h2>
+                            <p>Unggah foto, atur lokasi, dan pantau setiap tahap posting secara real-time.</p>
+                        </div>
+                        <div class="hero-metrics" aria-label="Ringkasan batch">
+                            <div><strong id="metricPhotos">0</strong><span>Foto</span></div>
+                            <div><strong id="metricPosts">0</strong><span>Posting</span></div>
+                        </div>
+                    </div>
+                    <!-- Login Card -->
+                    <div class="card">
+                        <div class="card-header">
+                            <h2>1. Buka Browser & Login Manual</h2>
+                        </div>
+                        <div class="card-body">
+                            <p class="card-desc">
+                                Klik tombol di bawah untuk membuka Chromium ke halaman login Facebook.
+                                Lakukan login akun Facebook Anda secara manual di jendela yang terbuka.
+                            </p>
+                            <div class="login-status-box" id="loginStatusBox">
+                                <span class="login-icon" id="loginIcon">&#x1F512;</span>
+                                <span id="loginStatusLabel">Status Login: Belum Login</span>
+                            </div>
+                            <div class="form-actions">
+                                <button class="btn btn-primary" id="btnOpenBrowser" type="button">
+                                    <span aria-hidden="true">↗</span> Buka Browser & Login
+                                </button>
+                                <button class="btn btn-danger" id="btnCloseBrowser" type="button" disabled>
+                                    <span aria-hidden="true">×</span> Tutup Browser
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Product Form Card -->
+                    <div class="card" id="formCard">
+                        <div class="card-header">
+                            <h2>2. Formulir Produk &amp; Setting Posting</h2>
+                            <span class="badge badge-lock" id="formLockBadge">&#x1F512; Login Diperlukan</span>
+                        </div>
+                        <div class="card-body">
+                            <div id="formBody" class="form-body">
+                                <div class="form-group">
+                                    <label for="photos">Foto Produk <span class="required">*</span></label>
+                                    <div class="upload-area" id="uploadArea">
+                                        <input type="file" id="photos" accept="image/*" multiple hidden>
+                                        <div class="upload-content">
+                                            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                                                <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+                                                <circle cx="8.5" cy="8.5" r="1.5"/>
+                                                <polyline points="21 15 16 10 5 21"/>
+                                            </svg>
+                                    <p>Tarik foto ke sini atau klik untuk memilih</p>
+                                            <span class="upload-hint">Foto akan dipasangkan sekuensial ke setiap posting</span>
+                                        </div>
+                                        <div class="preview-grid" id="previewGrid"></div>
+                                    </div>
+                                </div>
+
+                                <div class="form-row">
+                                    <div class="form-group">
+                                        <label for="title">Judul Produk <span class="required">*</span></label>
+                                        <input type="text" id="title" placeholder="Contoh: Sepatu Sneaker Original Size 42">
+                                    </div>
+                                    <div class="form-group">
+                                        <label for="price">Harga (Rp) <span class="required">*</span></label>
+                                        <input type="number" id="price" placeholder="150000">
+                                    </div>
+                                </div>
+
+                                <div class="form-row">
+                                    <div class="form-group">
+                                        <label for="sku">SKU / Kode Produk</label>
+                                        <input type="text" id="sku" placeholder="Contoh: SP-001">
+                                    </div>
+                                    <div class="form-group">
+                                        <label for="category">Jenis / Kategori <span class="required">*</span></label>
+                                        <select id="category">
+                                            <option value="">Pilih kategori Marketplace</option>
+                                            <optgroup label="Barang">
+                                                <option value="clothing">Pakaian &amp; Aksesori</option>
+                                                <option value="electronics">Elektronik</option>
+                                                <option value="entertainment">Hiburan</option>
+                                                <option value="family">Keluarga</option>
+                                                <option value="garden">Taman &amp; Luar Ruangan</option>
+                                                <option value="hobbies">Hobi</option>
+                                                <option value="home_goods">Perlengkapan Rumah</option>
+                                                <option value="home_improvement">Perlengkapan Perbaikan Rumah</option>
+                                                <option value="musical_instruments">Alat Musik</option>
+                                                <option value="office_supplies">Perlengkapan Kantor</option>
+                                                <option value="pet_supplies">Perlengkapan Hewan Peliharaan</option>
+                                                <option value="sporting_goods">Barang Olahraga</option>
+                                                <option value="toys_games">Mainan &amp; Permainan</option>
+                                                <option value="other">Lainnya</option>
+                                            </optgroup>
+                                            <optgroup label="Kategori khusus Marketplace">
+                                                <option value="vehicles">Kendaraan</option>
+                                                <option value="property_rentals">Properti Disewakan</option>
+                                                <option value="property_sale">Properti Dijual</option>
+                                                <option value="classifieds">Iklan Baris</option>
+                                                <option value="free_stuff">Barang Gratis</option>
+                                            </optgroup>
+                                        </select>
+                                    </div>
+                                    <div class="form-group">
+                                        <label for="condition">Kondisi Barang</label>
+                                        <select id="condition">
+                                            <option value="">Pilih</option>
+                                            <option value="new">Baru</option>
+                                            <option value="used_like_new">Bekas — Seperti Baru</option>
+                                            <option value="used_good">Bekas — Baik</option>
+                                            <option value="used_fair">Bekas — Cukup Baik</option>
+                                            <option value="for_parts">Untuk Suku Cadang</option>
+                                        </select>
+                                    </div>
+                                </div>
+
+                                <div class="form-row">
+                                    <div class="form-group">
+                                        <label for="label">Label</label>
+                                        <input type="text" id="label" placeholder="Contoh: Koleksi terbaru">
+                                    </div>
+                                    <div class="form-group">
+                                        <label for="brand">Merek / Brand</label>
+                                        <input type="text" id="brand" placeholder="Contoh: Nike">
+                                    </div>
+                                </div>
+
+                                <div class="form-group">
+                                    <label for="location">Daftar Lokasi Target <span class="required">*</span></label>
+                                    <textarea id="location" class="location-input" rows="5" placeholder="Contoh: Jakarta / Bandung / Surabaya"></textarea>
+                                    <p class="help-text">Pisahkan setiap lokasi dengan tanda <strong>/</strong>. Bot akan mengetik lokasi sesuai urutan ini, lalu Anda memilih saran lokasi langsung di Marketplace.</p>
+                                </div>
+
+                                <div class="manual-step" role="note">
+                                    <strong>Lokasi &amp; Terbitkan dilakukan manual</strong>
+                                    <p>Bot mengetik lokasi lalu berhenti. Pilih saran lokasi dan tekan Terbitkan pada tab Marketplace; setelah penerbitan terdeteksi, tab formulir berikutnya dibuka otomatis.</p>
+                                    <p class="manual-location-status" id="manualLocationStatus">Status lokasi: menunggu formulir dibuka.</p>
+                                </div>
+
+                                <div class="form-group">
+                                    <label for="description">Deskripsi Produk</label>
+                                    <textarea id="description" rows="4" placeholder="Jelaskan detail spesifikasi, kondisi, dan informasi pemesanan..."></textarea>
+                                </div>
+
+                                <div class="loop-settings">
+                                    <h3>&#x2699;&#xFE0F; Setting Perulangan Posting</h3>
+                                    <div class="form-row">
+                                        <div class="form-group">
+                                            <label for="loops">Jumlah Formulir</label>
+                                            <input type="number" id="loops" value="1" min="1" max="100">
+                                            <p class="help-text">Jumlah tab formulir Marketplace yang akan dibuat bot.</p>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <button class="btn btn-primary btn-block" id="btnPost" type="button" disabled>
+                                    <span aria-hidden="true">▶</span> Mulai Posting Otomatis
+                                </button>
+                                <button class="btn btn-primary btn-block btn-continue" id="btnContinuePost" type="button" disabled>
+                                    Saya sudah pilih lokasi &amp; Terbitkan — buka formulir berikutnya
+                                </button>
+                                <button class="btn btn-secondary btn-block btn-cancel" id="btnCancelPost" type="button" disabled>
+                                    Batalkan batch
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <aside class="sidebar">
+                    <div class="card log-card">
+                        <div class="card-header">
+                            <h2>&#x1F4CB; Log Aktivitas Bot</h2>
+                            <button class="btn-clear" id="btnClearLog" title="Bersihkan log">&#x2715;</button>
+                        </div>
+                        <div class="card-body">
+                            <div class="log-container" id="logContainer">
+                                <div class="log-placeholder">Siap. Log aktivitas bot akan muncul di sini secara real-time...</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="action-card">
+                        <div class="progress-heading">
+                            <span>Progres batch</span>
+                            <strong id="progressLabel">Menunggu data</strong>
+                        </div>
+                        <div class="progress-bar" id="progressBar" aria-hidden="true">
+                            <div class="progress-fill" id="progressFill"></div>
+                        </div>
+                        <div class="photo-pairing-info" id="photoPairingInfo">
+                            <strong>Info Pasangan Foto:</strong>
+                            <span id="pairingDetail">Belum ada foto / lokasi.</span>
+                        </div>
+                    </div>
+                </aside>
+            </div>
+        </main>
+    </div>
+
+    <script src="app.js" type="module"></script>
+</body>
+</html>

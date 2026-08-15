@@ -1,0 +1,12 @@
+{
+  "name": "botautopost",
+  "version": "1.0.1",
+  "description": "Aplikasi desktop untuk membantu membuat listing Facebook Marketplace.",
+  "main": "desktop/main.js",
+  "type": "module",
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "playwright": "^1.62.0"
+  }
+}
