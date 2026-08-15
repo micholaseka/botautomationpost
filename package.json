@@ -4,9 +4,17 @@
   "description": "Aplikasi desktop untuk membantu membuat listing Facebook Marketplace.",
   "main": "desktop/main.js",
   "type": "module",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder"
+  },
   "author": "",
   "license": "ISC",
   "dependencies": {
     "playwright": "^1.62.0"
+  },
+  "devDependencies": {
+    "electron": "^43.2.0",
+    "electron-builder": "^26.15.3"
   }
 }
