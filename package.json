@@ -1,6 +1,6 @@
 {
   "name": "botautopost",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Aplikasi desktop untuk membantu membuat listing Facebook Marketplace.",
   "main": "desktop/main.js",
   "type": "module",
@@ -16,5 +16,42 @@
   "devDependencies": {
     "electron": "^43.2.0",
     "electron-builder": "^26.15.3"
-  }
+  },
+  "build": {
+    "appId": "com.micholaseka.botautopost",
+    "productName": "Marketplace AutoPost Bot",
+    "executableName": "MarketplaceAutoPostBot",
+    "asar": true,
+    "extraResources": [
+      {
+        "from": "node_modules/playwright-core/.local-browsers",
+        "to": "chromium"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "Marketplace-AutoPost-Bot-${version}-Windows-Setup.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Marketplace AutoPost Bot"
+    }
+  },
+  "files": [
+    "**/*",
+    "!dist{,/**/*}",
+    "!.git{,/**/*}",
+    "!**/*.log"
+  ]
 }
