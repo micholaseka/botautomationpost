@@ -35,9 +35,14 @@
           "arch": [
             "x64"
           ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
         }
-      ],
-      "artifactName": "Marketplace-AutoPost-Bot-${version}-Windows-Setup.${ext}"
+      ]
     },
     "nsis": {
       "oneClick": false,
