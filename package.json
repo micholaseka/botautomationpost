@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "start": "electron .",
-    "build": "electron-builder"
+    "build": "electron-builder --publish never"
   },
   "author": "",
   "license": "ISC",
@@ -24,7 +24,7 @@
     "asar": true,
     "extraResources": [
       {
-        "from": "node_modules/playwright-core/.local-browsers",
+        "from": "node_modules/playwright-core/.local-browsers/chromium-1234",
         "to": "chromium"
       }
     ],
