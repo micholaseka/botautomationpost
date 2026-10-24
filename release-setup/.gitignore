@@ -1,0 +1,16 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+*.log
+
+# build release (Chromium bundle sementara)
+vendor/
+
+# data lokal dan sesi login (jangan pernah di-commit)
+storage/
+sessions/
+out/
+release/
+.DS_Store

@@ -1,0 +1,109 @@
+{
+  "name": "botautopost",
+  "version": "1.0.1",
+  "description": "Aplikasi desktop untuk membantu membuat listing Facebook Marketplace.",
+  "homepage": "https://github.com/micholaseka/botautomationpost",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/micholaseka/botautomationpost.git"
+  },
+  "author": {
+    "name": "micholaseka",
+    "email": "GANTI-DENGAN-EMAILMU@example.com"
+  },
+  "main": "desktop/main.js",
+  "type": "module",
+  "scripts": {
+    "start": "electron .",
+    "prepare:chromium": "node scripts/prepare-chromium.mjs",
+    "dist:win": "npm run prepare:chromium && electron-builder --win nsis --x64 --publish never",
+    "dist:linux": "npm run prepare:chromium && electron-builder --linux deb rpm --x64 --publish never"
+  },
+  "license": "ISC",
+  "dependencies": {
+    "playwright": "^1.62.0"
+  },
+  "devDependencies": {
+    "electron": "^43.2.0",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "com.micholaseka.botautopost",
+    "productName": "Marketplace AutoPost Bot",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "desktop/**/*",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "node_modules/playwright/**",
+      "node_modules/playwright-core/**"
+    ],
+    "extraResources": [
+      {
+        "from": "vendor/chromium",
+        "to": "chromium"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "${name}-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "deleteAppDataOnUninstall": false
+    },
+    "linux": {
+      "target": [
+        "deb",
+        "rpm"
+      ],
+      "category": "Utility",
+      "synopsis": "Bantu buat listing Facebook Marketplace"
+    },
+    "deb": {
+      "depends": [
+        "libgtk-3-0",
+        "libnotify4",
+        "libnss3",
+        "libxss1",
+        "libxtst6",
+        "xdg-utils",
+        "libatspi2.0-0",
+        "libuuid1",
+        "libsecret-1-0",
+        "libgbm1",
+        "libasound2",
+        "libxkbcommon0",
+        "libcups2"
+      ]
+    },
+    "rpm": {
+      "depends": [
+        "gtk3",
+        "libnotify",
+        "nss",
+        "libXScrnSaver",
+        "libXtst",
+        "xdg-utils",
+        "at-spi2-core",
+        "libuuid",
+        "libsecret",
+        "mesa-libgbm",
+        "alsa-lib",
+        "libxkbcommon",
+        "cups-libs"
+      ]
+    }
+  }
+}
