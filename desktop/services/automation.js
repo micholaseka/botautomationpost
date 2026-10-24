@@ -232,11 +232,16 @@ const MARKETPLACE_CONDITIONS = {
 };
 
 export class AutomationService extends EventEmitter {
-  constructor({ sessionDirectory } = {}) {
+  constructor({ sessionDirectory, closePostedTabs = true } = {}) {
     super();
     this.browser = null;
     this.context = null;
     this.page = null;
+    // Tab pertama (halaman login). Tab ini sengaja tidak ditutup otomatis
+    // supaya jendela browser tetap hidup dan deteksi login tetap berjalan.
+    this.mainPage = null;
+    // Tutup tab formulir otomatis setelah penerbitan terkonfirmasi.
+    this.closePostedTabs = closePostedTabs;
     // Login cookies are personal data.  Keep them in Electron's per-user
     // data directory instead of the application bundle, which is read-only
     // after installation and may be copied to another computer.
@@ -297,6 +302,7 @@ export class AutomationService extends EventEmitter {
       });
 
       this.page = await this.context.newPage();
+      this.mainPage = this.page;
       this.page.setDefaultTimeout(45000);
       this.page.setDefaultNavigationTimeout(45000);
 
@@ -792,7 +798,8 @@ export class AutomationService extends EventEmitter {
   async executeSinglePost(item, tag) {
     this.throwIfCancelled();
     this.emit("log", `${tag} Membuka tab formulir Marketplace baru...`, "info");
-    this.page = await this.context.newPage();
+    const postPage = await this.context.newPage();
+    this.page = postPage;
     this.page.setDefaultTimeout(45000);
     this.page.setDefaultNavigationTimeout(45000);
     this.emit(
@@ -820,8 +827,71 @@ export class AutomationService extends EventEmitter {
     await this.fillLabel(item.label, tag);
     await this.fillBrand(item.brand, tag);
     await this.fillDescription(item.description, tag);
+    await this.waitForUploadsToSettle(tag);
+    await this.recheckCoreFields(item, tag);
     await this.typeLocation(item.expectedLocation, tag);
     await this.waitForManualLocationAndPublish(tag, item.expectedLocation);
+
+    // Baris ini hanya tercapai kalau batch TIDAK dibatalkan (waitFor... memanggil
+    // throwIfCancelled di akhir). Jadi tab dengan form yang belum terbit tidak
+    // ikut tertutup saat pengguna menekan Batal.
+    await this.closePostedTab(postPage, tag);
+  }
+
+  async closePostedTab(postPage, tag) {
+    if (!this.closePostedTabs) return;
+    if (!postPage || postPage.isClosed()) {
+      this.restoreMainPage();
+      return;
+    }
+
+    try {
+      // Beri waktu singkat agar request penerbitan Facebook selesai
+      // sebelum tab ditutup.
+      await this.waitWithCancellation(1500);
+
+      // Jangan sampai browser kehilangan tab terakhir (jendela ikut hilang).
+      const survivors = this.context
+        .pages()
+        .filter((candidate) => candidate !== postPage && !candidate.isClosed());
+      if (!survivors.length) {
+        const holder = await this.context.newPage();
+        holder.setDefaultTimeout(45000);
+        holder.setDefaultNavigationTimeout(45000);
+        this.mainPage = holder;
+      }
+
+      // runBeforeUnload default-nya false, jadi dialog "Tinggalkan halaman?"
+      // dari Facebook tidak menghalangi penutupan.
+      await postPage.close();
+      this.emit("log", `${tag} Tab formulir ditutup otomatis.`, "info");
+    } catch (err) {
+      if (err.code === "BATCH_CANCELLED") throw err;
+      this.emit(
+        "log",
+        `${tag} Gagal menutup tab otomatis: ${err.message}`,
+        "warn",
+      );
+    } finally {
+      this.restoreMainPage();
+    }
+  }
+
+  restoreMainPage() {
+    // this.page dipakai oleh deteksi login dan status browser. Setelah tab
+    // posting ditutup, arahkan kembali ke tab yang masih hidup.
+    if (this.page && !this.page.isClosed()) return;
+    if (this.mainPage && !this.mainPage.isClosed()) {
+      this.page = this.mainPage;
+      return;
+    }
+    const alive = this.context
+      ?.pages()
+      .find((candidate) => !candidate.isClosed());
+    if (alive) {
+      this.mainPage = alive;
+      this.page = alive;
+    }
   }
 
   async uploadPhotos(photos, tag) {
@@ -831,51 +901,181 @@ export class AutomationService extends EventEmitter {
     await fileInput.waitFor({ state: "attached", timeout: 20000 });
     await fileInput.setInputFiles(photos);
 
-    const spinner = this.page
-      .locator('[role="progressbar"], [aria-busy="true"]')
-      .first();
-    if ((await spinner.count()) > 0) {
-      await spinner
-        .waitFor({ state: "detached", timeout: 30000 })
-        .catch(() => {});
+    // Tidak menunggu proses upload selesai: form langsung diisi sambil foto
+    // diproses Facebook. Pengecekan upload dilakukan sebelum langkah manual
+    // (lihat waitForUploadsToSettle).
+    this.emit(
+      "log",
+      `${tag} Foto dikirim. Melanjutkan mengisi formulir...`,
+      "success",
+    );
+  }
+
+  // Hanya menunggu kalau ada progress bar yang BENAR-BENAR terlihat.
+  // Selector lama `[aria-busy="true"]` cocok dengan elemen Facebook yang
+  // selalu ada, sehingga dulu menunggu sampai 30 detik tanpa alasan.
+  async waitForUploadsToSettle(tag, timeout = 8000) {
+    const busy = this.page.locator('[role="progressbar"]:visible');
+    const settled = await this.pollUntil(
+      async () => ((await busy.count()) === 0 ? true : null),
+      { timeout, interval: 100 },
+    );
+    if (!settled) {
+      this.emit(
+        "log",
+        `${tag} Upload foto masih berjalan. Pastikan foto sudah muncul sebelum menerbitkan.`,
+        "warn",
+      );
     }
-    this.emit("log", `${tag} Foto berhasil diupload.`, "success");
+  }
+
+  // Form React kadang me-render ulang setelah foto masuk dan menghapus isian
+  // yang sudah diketik. Cek cepat, isi ulang hanya kalau memang berubah.
+  async recheckCoreFields(item, tag) {
+    const digits = (text) => String(text).replace(/[^0-9]/g, "");
+    const plain = (text) => String(text).replace(/\r\n/g, "\n").trim();
+    const checks = [
+      {
+        name: "judul",
+        locator: this.titleLocator(),
+        expected: item.title,
+        clean: plain,
+        refill: () => this.fillTitle(item.title, tag),
+      },
+      {
+        name: "harga",
+        locator: this.priceLocator(),
+        expected: item.price,
+        clean: digits,
+        refill: () => this.fillPrice(item.price, tag),
+      },
+    ];
+
+    for (const check of checks) {
+      if (!check.expected) continue;
+      let current;
+      try {
+        current = await check.locator.first().inputValue({ timeout: 1000 });
+      } catch {
+        continue;
+      }
+      if (check.clean(current) !== check.clean(check.expected)) {
+        this.emit(
+          "log",
+          `${tag} Kolom ${check.name} berubah setelah upload foto. Mengisi ulang...`,
+          "warn",
+        );
+        await check.refill();
+      }
+    }
+  }
+
+  // ---- Helper pengisian cepat -------------------------------------------
+  // Prinsip: begitu elemen terdeteksi, langsung dipakai. Tidak ada jeda tetap;
+  // batas waktu (timeout) hanya berlaku kalau elemennya memang tidak muncul.
+
+  // Ulangi `getter` sampai mengembalikan nilai truthy, lalu langsung kembali.
+  async pollUntil(getter, { timeout = 10000, interval = 50 } = {}) {
+    const deadline = Date.now() + timeout;
+    for (;;) {
+      this.throwIfCancelled();
+      const result = await getter().catch(() => null);
+      if (result) return result;
+      if (Date.now() >= deadline) return null;
+      await new Promise((resolve) => setTimeout(resolve, interval));
+    }
+  }
+
+  // Tunggu locator tampil (Playwright memantau tanpa jeda tetap).
+  async waitForField(locator, timeout = 15000) {
+    const field = locator.first();
+    try {
+      await field.waitFor({ state: "visible", timeout });
+      return field;
+    } catch {
+      return null;
+    }
+  }
+
+  // Isi field segera setelah muncul, lalu pastikan nilainya benar-benar masuk.
+  async fillWhenReady(
+    locator,
+    value,
+    { fieldName, tag = "", required = true, timeout, normalize } = {},
+  ) {
+    const field = await this.waitForField(
+      locator,
+      timeout ?? (required ? 20000 : 1500),
+    );
+    if (!field) {
+      if (required)
+        throw new Error(`Kolom ${fieldName} Marketplace tidak ditemukan.`);
+      return false;
+    }
+
+    const clean =
+      normalize ?? ((text) => String(text).replace(/\r\n/g, "\n").trim());
+    const expected = clean(value);
+
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      this.throwIfCancelled();
+      await field.scrollIntoViewIfNeeded();
+      await field.click();
+      await field.fill(String(value));
+
+      const ok = await this.pollUntil(
+        async () => {
+          try {
+            return clean(await field.inputValue()) === expected;
+          } catch {
+            return true; // bukan input/textarea: tidak bisa diverifikasi
+          }
+        },
+        { timeout: 800, interval: 40 },
+      );
+      if (ok) return true;
+    }
+
+    // Jangan hentikan batch hanya karena format tampilan berbeda; pengguna
+    // tetap melihat formulir sebelum menerbitkan secara manual.
+    this.emit(
+      "log",
+      `${tag} Nilai kolom ${fieldName} belum cocok setelah 3 percobaan. Periksa manual.`,
+      "warn",
+    );
+    return true;
+  }
+
+  titleLocator() {
+    return this.page.locator(
+      'input[aria-label="Title"], input[aria-label="Judul"], label:has-text("Title") input, label:has-text("Judul") input',
+    );
+  }
+
+  priceLocator() {
+    return this.page.locator(
+      'input[aria-label="Price"], input[aria-label="Harga"], label:has-text("Price") input, label:has-text("Harga") input',
+    );
   }
 
   async fillTitle(title, tag) {
     if (!title) return;
     this.emit("log", `${tag} Mengisi judul: "${title}"`, "info");
-    const loc = this.page
-      .locator(
-        'input[aria-label="Title"], input[aria-label="Judul"], label:has-text("Title") input, label:has-text("Judul") input',
-      )
-      .first();
-    if ((await loc.count()) > 0 && (await loc.isVisible().catch(() => false))) {
-      await loc.scrollIntoViewIfNeeded();
-      await loc.click();
-      await loc.fill("");
-      await loc.fill(title);
-    } else {
-      throw new Error("Kolom judul Marketplace tidak ditemukan.");
-    }
+    await this.fillWhenReady(this.titleLocator(), title, {
+      fieldName: "judul",
+      tag,
+    });
   }
 
   async fillPrice(price, tag) {
     if (!price) return;
     this.emit("log", `${tag} Mengisi harga: Rp${price}`, "info");
-    const loc = this.page
-      .locator(
-        'input[aria-label="Price"], input[aria-label="Harga"], label:has-text("Price") input, label:has-text("Harga") input',
-      )
-      .first();
-    if ((await loc.count()) > 0 && (await loc.isVisible().catch(() => false))) {
-      await loc.scrollIntoViewIfNeeded();
-      await loc.click();
-      await loc.fill("");
-      await loc.fill(String(price));
-    } else {
-      throw new Error("Kolom harga Marketplace tidak ditemukan.");
-    }
+    await this.fillWhenReady(this.priceLocator(), String(price), {
+      fieldName: "harga",
+      tag,
+      // Facebook bisa menampilkan harga dengan pemisah ribuan.
+      normalize: (text) => String(text).replace(/[^0-9]/g, ""),
+    });
   }
 
   async selectCategory(categoryCode, tag) {
@@ -913,9 +1113,11 @@ export class AutomationService extends EventEmitter {
       "info",
     );
 
-    await this.waitWithCancellation(800);
-
-    const option = await this.findExactMarketplaceOption(subcategory.aliases);
+    // Langsung ambil opsi begitu daftar muncul (tanpa jeda tetap).
+    const option = await this.pollUntil(
+      () => this.findExactMarketplaceOption(subcategory.aliases),
+      { timeout: 8000, interval: 50 },
+    );
 
     if (!option) {
       throw new Error(
@@ -928,7 +1130,8 @@ export class AutomationService extends EventEmitter {
     // Jangan pernah klik kandidat pertama secara otomatis.
     await option.click();
 
-    await this.waitWithCancellation(800);
+    // Lanjut begitu daftar menutup; batas 1,5 dtk kalau daftar tetap terlihat.
+    await option.waitFor({ state: "hidden", timeout: 1500 }).catch(() => {});
 
     this.emit(
       "log",
@@ -951,8 +1154,7 @@ export class AutomationService extends EventEmitter {
 
     await control.scrollIntoViewIfNeeded();
     await control.click();
-
-    await this.waitWithCancellation(800);
+    // Tidak perlu jeda: selectSubcategory menunggu opsi muncul sendiri.
   }
 
   async findExactMarketplaceOption(aliases) {
@@ -1039,22 +1241,29 @@ export class AutomationService extends EventEmitter {
 
     await control.scrollIntoViewIfNeeded();
     await control.click();
-    await this.waitWithCancellation(600);
 
-    let option = await this.findOptionByAliases(aliases);
+    // Ambil opsi segera setelah terdeteksi.
+    let option = await this.pollUntil(() => this.findOptionByAliases(aliases), {
+      timeout: 1200,
+    });
     if (!option) {
-      const searchInput = await this.findFirstVisible(
-        this.page.locator(
-          '[role="dialog"] input, [role="listbox"] input, input[aria-label="Search"], input[aria-label="Cari"]',
-        ),
+      const searchInput = await this.pollUntil(
+        () =>
+          this.findFirstVisible(
+            this.page.locator(
+              '[role="dialog"] input, [role="listbox"] input, input[aria-label="Search"], input[aria-label="Cari"]',
+            ),
+          ),
+        { timeout: 500 },
       );
       if (searchInput) {
         await searchInput.fill(aliases[0]);
       } else {
-        await this.page.keyboard.type(aliases[0], { delay: 35 });
+        await this.page.keyboard.type(aliases[0]);
       }
-      await this.waitWithCancellation(600);
-      option = await this.findOptionByAliases(aliases);
+      option = await this.pollUntil(() => this.findOptionByAliases(aliases), {
+        timeout: 3000,
+      });
     }
 
     if (!option)
@@ -1062,12 +1271,15 @@ export class AutomationService extends EventEmitter {
         `Pilihan ${fieldName} tidak tersedia pada formulir Marketplace ini.`,
       );
     await option.click();
-    await this.waitWithCancellation(700);
     await this.verifyMarketplaceChoice(control, aliases, fieldName);
   }
 
-  async findMarketplaceFieldControl(controlSelector, fieldLabels) {
-    const timeoutAt = Date.now() + 15000;
+  async findMarketplaceFieldControl(
+    controlSelector,
+    fieldLabels,
+    timeout = 15000,
+  ) {
+    const timeoutAt = Date.now() + timeout;
     const labelButtonSelector = fieldLabels
       .map(
         (label) =>
@@ -1120,24 +1332,28 @@ export class AutomationService extends EventEmitter {
         if (nearbyControl) return nearbyControl;
       }
 
-      await this.waitWithCancellation(300);
+      await this.waitWithCancellation(100);
     }
     return null;
   }
 
   async verifyMarketplaceChoice(control, aliases, fieldName) {
-    const displayedValue = (await control.innerText().catch(() => ""))
-      .trim()
-      .toLocaleLowerCase();
-    if (!displayedValue) return;
-    const wasSelected = aliases.some((alias) =>
-      displayedValue.includes(alias.toLocaleLowerCase()),
+    const readValue = async () =>
+      (await control.innerText().catch(() => "")).trim().toLocaleLowerCase();
+    const matches = (text) =>
+      aliases.some((alias) => text.includes(alias.toLocaleLowerCase()));
+
+    // Selesai begitu tampilan field berubah; tidak menunggu jeda tetap.
+    const selected = await this.pollUntil(
+      async () => (matches(await readValue()) ? true : null),
+      { timeout: 3000, interval: 50 },
     );
-    if (!wasSelected) {
-      throw new Error(
-        `Nilai ${fieldName} tidak berubah setelah dipilih. Coba buka ulang formulir Marketplace.`,
-      );
-    }
+    if (selected) return;
+
+    if (!(await readValue())) return;
+    throw new Error(
+      `Nilai ${fieldName} tidak berubah setelah dipilih. Coba buka ulang formulir Marketplace.`,
+    );
   }
 
   async findOptionByAliases(aliases) {
@@ -1169,17 +1385,13 @@ export class AutomationService extends EventEmitter {
   async fillSku(sku, tag) {
     if (!sku) return;
     this.emit("log", `${tag} Mengisi SKU: "${sku}"`, "info");
-    const loc = this.page
-      .locator(
+    await this.fillWhenReady(
+      this.page.locator(
         'input[aria-label="SKU"], input[aria-label="Sku"], label:has-text("SKU") input, input[aria-label="Kode"]',
-      )
-      .first();
-    if ((await loc.count()) > 0 && (await loc.isVisible().catch(() => false))) {
-      await loc.scrollIntoViewIfNeeded();
-      await loc.click();
-      await loc.fill("");
-      await loc.fill(sku);
-    }
+      ),
+      sku,
+      { fieldName: "SKU", tag, required: false, timeout: 1500 },
+    );
   }
 
   async fillLabel(label, tag) {
@@ -1214,6 +1426,7 @@ export class AutomationService extends EventEmitter {
       const control = await this.findMarketplaceFieldControl(
         selectors,
         fieldLabels,
+        4000,
       );
       if (!control) {
         this.emit(
@@ -1294,28 +1507,15 @@ export class AutomationService extends EventEmitter {
   async fillDescription(description, tag) {
     if (!description) return;
     this.emit("log", `${tag} Mengisi deskripsi...`, "info");
-    const loc = this.page
-      .locator(
-        'textarea[aria-label="Description"], textarea[aria-label="Deskripsi"], label:has-text("Description") textarea, label:has-text("Deskripsi") textarea',
-      )
-      .first();
-    if ((await loc.count()) > 0 && (await loc.isVisible().catch(() => false))) {
-      await loc.scrollIntoViewIfNeeded();
-      await loc.click();
-      await loc.fill("");
-      await loc.fill(description);
-      return;
-    }
-    const fallback = this.page.locator("textarea").first();
-    if (
-      (await fallback.count()) > 0 &&
-      (await fallback.isVisible().catch(() => false))
-    ) {
-      await fallback.scrollIntoViewIfNeeded();
-      await fallback.click();
-      await fallback.fill("");
-      await fallback.fill(description);
-    }
+    // Selector spesifik atau textarea apa pun (fallback lama), mana yang
+    // muncul lebih dulu langsung dipakai.
+    await this.fillWhenReady(
+      this.page.locator(
+        'textarea[aria-label="Description"], textarea[aria-label="Deskripsi"], label:has-text("Description") textarea, label:has-text("Deskripsi") textarea, textarea',
+      ),
+      description,
+      { fieldName: "deskripsi", tag, required: false, timeout: 3000 },
+    );
   }
 
   async typeLocation(location, tag) {
@@ -1503,6 +1703,7 @@ export class AutomationService extends EventEmitter {
     this.browser = null;
     this.context = null;
     this.page = null;
+    this.mainPage = null;
 
     this.emit("log", "Browser telah ditutup.", "info");
     this.emit("status", { state: "", text: "Browser Ditutup" });
