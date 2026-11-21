@@ -3,7 +3,7 @@ name: Build Windows Installer (.exe)
 on:
   push:
     tags:
-      - "v2.0.0"
+      - "v*"
   workflow_dispatch:
     inputs:
       publish_release:

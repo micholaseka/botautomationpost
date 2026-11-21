@@ -1,6 +1,6 @@
 {
   "name": "botautopost",
-  "version": "1.0.2",
+  "version": "2.0.0",
   "description": "Aplikasi desktop untuk membantu membuat listing Facebook Marketplace.",
   "main": "desktop/main.js",
   "type": "module",
@@ -62,7 +62,7 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "Marketplace AutoPost Bot",
-      "artifactName": "${executableName}-Setup-${version}.${ext}"
+      "artifactName": "MarketplaceAutoPostBot-Setup-${version}.${ext}"
     }
   }
 }
