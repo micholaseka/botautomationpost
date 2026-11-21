@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain } from 'electron';
+import { app, BrowserWindow, ipcMain, safeStorage } from 'electron';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { AutomationService } from './services/automation.js';
@@ -6,9 +6,12 @@ import { AutomationService } from './services/automation.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 let mainWindow = null;
-// Each Windows account gets an independent login session.  In a packaged app
+// Each Windows account gets an independent login session. In a packaged app
 // this resolves to AppData\Roaming\<app name>, not the installed application.
-const automation = new AutomationService({ sessionDirectory: app.getPath('userData') });
+const automation = new AutomationService({
+    sessionDirectory: app.getPath('userData'),
+    safeStorage
+});
 
 function createWindow() {
     mainWindow = new BrowserWindow({

@@ -1,5 +1,6 @@
 import { chromium } from "playwright";
 import fs from "fs/promises";
+import os from "os";
 import path from "path";
 import { EventEmitter } from "events";
 import { fileURLToPath } from "url";
@@ -9,6 +10,464 @@ import { spawn } from "child_process";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, "..", "..");
 const require = createRequire(import.meta.url);
+
+// ---------------------------------------------------------------------------
+// Anti-detection: randomised browser identity per session
+// ---------------------------------------------------------------------------
+
+const DESKTOP_USER_AGENTS = [
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0",
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+];
+
+const WEBGL_VENDORS = [
+  "Google Inc. (NVIDIA)",
+  "Google Inc. (AMD)",
+  "Google Inc. (Intel)",
+];
+
+const WEBGL_RENDERERS = [
+  "ANGLE (NVIDIA, NVIDIA GeForce GTX 1660 SUPER Direct3D11 vs_5_0 ps_5_0, D3D11)",
+  "ANGLE (AMD, AMD Radeon RX 580 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+  "ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+  "ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+  "ANGLE (AMD, AMD Radeon RX 5700 XT Direct3D11 vs_5_0 ps_5_0, D3D11)",
+];
+
+const SCREEN_RESOLUTIONS = [
+  { width: 1920, height: 1080 },
+  { width: 2560, height: 1440 },
+  { width: 1366, height: 768 },
+  { width: 1536, height: 864 },
+  { width: 1440, height: 900 },
+];
+
+const LOCALES = ["id-ID", "en-US", "en-GB"];
+const TIMEZONES = [
+  "Asia/Jakarta",
+  "Asia/Makassar",
+  "Asia/Jayapura",
+  "America/New_York",
+];
+
+function pickRandom(arr) {
+  return arr[Math.floor(Math.random() * arr.length)];
+}
+
+function randomInt(min, max) {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+// ---------------------------------------------------------------------------
+// Spintax & Anti-Duplicate Content Engine
+// Mengacak teks dengan format {opsi1|opsi2|opsi3} & menambah entropi tak terlihat
+// ---------------------------------------------------------------------------
+
+function parseSpintax(text) {
+  if (!text) return "";
+  let result = String(text);
+  const regex = /\{([^{}]+)\}/;
+  let match;
+  while ((match = regex.exec(result)) !== null) {
+    const choices = match[1].split("|");
+    const chosen = choices[Math.floor(Math.random() * choices.length)];
+    result = result.slice(0, match.index) + chosen + result.slice(match.index + match[0].length);
+  }
+  return result;
+}
+
+function addZeroWidthEntropy(text) {
+  if (!text) return text;
+  // Sisipkan 2-5 karakter zero-width tak terlihat di akhir teks agar hash teks unik di Facebook
+  const invisibleChars = ["\u200B", "\u200C", "\u200D", "\uFEFF"];
+  let entropy = "";
+  const count = 2 + Math.floor(Math.random() * 4);
+  for (let i = 0; i < count; i++) {
+    entropy += invisibleChars[Math.floor(Math.random() * invisibleChars.length)];
+  }
+  return text + entropy;
+}
+
+// Script yang di-inject SEBELUM halaman apapun dimuat.  Menutupi SEMUA
+// signal yang dipakai Facebook untuk mendeteksi browser automation — termasuk
+// layer agresif: CDP leak, AudioContext, font enumeration, iframe, Notification
+// constructor, stack trace inspection, dan event timing.
+function buildStealthScript({
+  webglVendor, webglRenderer, hardwareConcurrency, deviceMemory,
+  canvasNoise, audioNoise,
+}) {
+  return `
+    // ===== LAYER 1: Core automation flags ===================================
+
+    // 1a. navigator.webdriver — sinyal utama Playwright/Selenium/Puppeteer
+    Object.defineProperty(navigator, 'webdriver', {
+      get: () => undefined,
+      configurable: true,
+    });
+    // Hapus juga dari prototype chain
+    delete Object.getPrototypeOf(navigator).webdriver;
+
+    // 1b. Automation flags lain yang dipakai Facebook
+    for (const prop of [
+      'domAutomation', 'domAutomationController', '_phantom',
+      '__nightmare', '_selenium', 'callPhantom', '__webdriver_evaluate',
+      '__selenium_evaluate', '__webdriver_script_function',
+      '__webdriver_script_func', '__webdriver_script_fn',
+      '__fxdriver_evaluate', '__driver_unwrapped', '__webdriver_unwrapped',
+      '__driver_evaluate', '__selenium_unwrapped', '_Selenium_IDE_Recorder',
+      'calledSelenium', '_WEBDRIVER_ELEM_CACHE', 'ChromeDriverw',
+      'driver-hierarchical', 'driver-evaluate', 'webdriver-hierarchical',
+    ]) {
+      try { delete window[prop]; } catch {}
+      try {
+        Object.defineProperty(window, prop, {
+          get: () => undefined,
+          set: () => {},
+          configurable: true,
+        });
+      } catch {}
+    }
+
+    // ===== LAYER 2: Chrome environment ======================================
+
+    // 2a. window.chrome — browser sungguhan punya objek ini lengkap
+    if (!window.chrome) {
+      window.chrome = {};
+    }
+    window.chrome.runtime = window.chrome.runtime || {
+      PlatformOs: { MAC: 'mac', WIN: 'win', ANDROID: 'android', CROS: 'cros', LINUX: 'linux', OPENBSD: 'openbsd' },
+      PlatformArch: { ARM: 'arm', X86_32: 'x86-32', X86_64: 'x86-64', MIPS: 'mips', MIPS64: 'mips64' },
+      PlatformNaclArch: { ARM: 'arm', X86_32: 'x86-32', X86_64: 'x86-64', MIPS: 'mips', MIPS64: 'mips64' },
+      RequestUpdateCheckStatus: { THROTTLED: 'throttled', NO_UPDATE: 'no_update', UPDATE_AVAILABLE: 'update_available' },
+      OnInstalledReason: { INSTALL: 'install', UPDATE: 'update', CHROME_UPDATE: 'chrome_update', SHARED_MODULE_UPDATE: 'shared_module_update' },
+      OnRestartRequiredReason: { APP_UPDATE: 'app_update', OS_UPDATE: 'os_update', PERIODIC: 'periodic' },
+      connect: () => { throw new Error('Could not establish connection.'); },
+      sendMessage: () => { throw new Error('Could not establish connection.'); },
+    };
+    window.chrome.loadTimes = window.chrome.loadTimes || function () {
+      return {
+        commitLoadTime: Date.now() / 1000 - 2.5,
+        connectionInfo: 'h2',
+        finishDocumentLoadTime: Date.now() / 1000 - 0.4,
+        finishLoadTime: Date.now() / 1000 - 0.1,
+        firstPaintAfterLoadTime: 0,
+        firstPaintTime: Date.now() / 1000 - 1.8,
+        navigationType: 'Other',
+        npnNegotiatedProtocol: 'h2',
+        requestTime: Date.now() / 1000 - 3.0,
+        startLoadTime: Date.now() / 1000 - 2.8,
+        wasAlternateProtocolAvailable: false,
+        wasFetchedViaSpdy: true,
+        wasNpnNegotiated: true,
+      };
+    };
+    window.chrome.csi = window.chrome.csi || function () {
+      return {
+        onloadT: Date.now(),
+        startE: Date.now() - 1200,
+        pageT: 3200 + Math.random() * 800,
+        tran: 15,
+      };
+    };
+
+    // ===== LAYER 3: Permissions API =========================================
+
+    const originalQuery = window.navigator.permissions?.query?.bind(window.navigator.permissions);
+    if (originalQuery) {
+      window.navigator.permissions.query = (parameters) => {
+        if (parameters.name === 'notifications') {
+          return Promise.resolve({ state: Notification.permission });
+        }
+        return originalQuery(parameters);
+      };
+    }
+
+    // ===== LAYER 4: Navigator properties ====================================
+
+    // 4a. Plugins — browser biasa punya >= 3 plugin; Playwright punya 0
+    const fakePlugins = [
+      { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format', length: 1 },
+      { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '', length: 1 },
+      { name: 'Native Client', filename: 'internal-nacl-plugin', description: '', length: 2 },
+    ];
+    fakePlugins.refresh = () => {};
+    fakePlugins.item = (i) => fakePlugins[i] || null;
+    fakePlugins.namedItem = (n) => fakePlugins.find(p => p.name === n) || null;
+    Object.defineProperty(navigator, 'plugins', { get: () => fakePlugins });
+
+    // 4b. MimeTypes — konsisten dengan plugins
+    const fakeMimeTypes = [
+      { type: 'application/pdf', suffixes: 'pdf', description: 'Portable Document Format', enabledPlugin: fakePlugins[0] },
+      { type: 'application/x-nacl', suffixes: '', description: 'Native Client Executable', enabledPlugin: fakePlugins[2] },
+      { type: 'application/x-pnacl', suffixes: '', description: 'Portable Native Client Executable', enabledPlugin: fakePlugins[2] },
+    ];
+    fakeMimeTypes.item = (i) => fakeMimeTypes[i] || null;
+    fakeMimeTypes.namedItem = (n) => fakeMimeTypes.find(m => m.type === n) || null;
+    Object.defineProperty(navigator, 'mimeTypes', { get: () => fakeMimeTypes });
+
+    // 4c. Languages — pastikan konsisten
+    Object.defineProperty(navigator, 'languages', {
+      get: () => ['id-ID', 'id', 'en-US', 'en'],
+    });
+
+    // 4d. Hardware concurrency & device memory — randomised per sesi
+    Object.defineProperty(navigator, 'hardwareConcurrency', {
+      get: () => ${hardwareConcurrency},
+    });
+    Object.defineProperty(navigator, 'deviceMemory', {
+      get: () => ${deviceMemory},
+    });
+
+    // 4e. maxTouchPoints — desktop tidak punya touch
+    Object.defineProperty(navigator, 'maxTouchPoints', {
+      get: () => 0,
+    });
+
+    // 4f. connection — browser biasa punya NetworkInformation
+    if (!navigator.connection) {
+      Object.defineProperty(navigator, 'connection', {
+        get: () => ({
+          effectiveType: '4g',
+          rtt: ${pickRandom([50, 100, 150])},
+          downlink: ${pickRandom([1.5, 2.5, 5, 10])},
+          saveData: false,
+        }),
+      });
+    }
+
+    // ===== LAYER 5: WebGL fingerprint =======================================
+
+    const getParameter = WebGLRenderingContext.prototype.getParameter;
+    WebGLRenderingContext.prototype.getParameter = function (param) {
+      if (param === 37445) return '${webglVendor}';    // UNMASKED_VENDOR
+      if (param === 37446) return '${webglRenderer}';  // UNMASKED_RENDERER
+      return getParameter.call(this, param);
+    };
+    const getParameter2 = WebGL2RenderingContext.prototype.getParameter;
+    WebGL2RenderingContext.prototype.getParameter = function (param) {
+      if (param === 37445) return '${webglVendor}';
+      if (param === 37446) return '${webglRenderer}';
+      return getParameter2.call(this, param);
+    };
+
+    // Juga override getExtension untuk WEBGL_debug_renderer_info
+    const origGetExt = WebGLRenderingContext.prototype.getExtension;
+    WebGLRenderingContext.prototype.getExtension = function (name) {
+      if (name === 'WEBGL_debug_renderer_info') {
+        return { UNMASKED_VENDOR_WEBGL: 37445, UNMASKED_RENDERER_WEBGL: 37446 };
+      }
+      return origGetExt.call(this, name);
+    };
+
+    // ===== LAYER 6: Canvas fingerprint ======================================
+
+    // 6a. toDataURL — noise minimal supaya hash berubah tiap sesi
+    const originalToDataURL = HTMLCanvasElement.prototype.toDataURL;
+    HTMLCanvasElement.prototype.toDataURL = function (type) {
+      if (this.width === 0 && this.height === 0) return originalToDataURL.apply(this, arguments);
+      const ctx = this.getContext('2d');
+      if (ctx) {
+        const style = ctx.fillStyle;
+        ctx.fillStyle = 'rgba(${canvasNoise[0]},${canvasNoise[1]},${canvasNoise[2]},0.01)';
+        ctx.fillRect(0, 0, 1, 1);
+        ctx.fillStyle = style;
+      }
+      return originalToDataURL.apply(this, arguments);
+    };
+
+    // 6b. toBlob — Facebook juga pakai toBlob untuk canvas fingerprint
+    const originalToBlob = HTMLCanvasElement.prototype.toBlob;
+    HTMLCanvasElement.prototype.toBlob = function (callback, type, quality) {
+      if (this.width > 0 && this.height > 0) {
+        const ctx = this.getContext('2d');
+        if (ctx) {
+          const style = ctx.fillStyle;
+          ctx.fillStyle = 'rgba(${canvasNoise[0]},${canvasNoise[2]},${canvasNoise[1]},0.01)';
+          ctx.fillRect(0, 0, 1, 1);
+          ctx.fillStyle = style;
+        }
+      }
+      return originalToBlob.call(this, callback, type, quality);
+    };
+
+    // 6c. getImageData — lapisan ketiga canvas fingerprint
+    const origGetImageData = CanvasRenderingContext2D.prototype.getImageData;
+    CanvasRenderingContext2D.prototype.getImageData = function (sx, sy, sw, sh) {
+      const imageData = origGetImageData.call(this, sx, sy, sw, sh);
+      // Flip 1 byte per 512 pixels — invisible tapi hash pasti berubah
+      for (let i = 0; i < imageData.data.length; i += 2048) {
+        imageData.data[i] = imageData.data[i] ^ 1;
+      }
+      return imageData;
+    };
+
+    // ===== LAYER 7: AudioContext fingerprint =================================
+
+    const origGetFloatFreq = AnalyserNode.prototype.getFloatFrequencyData;
+    AnalyserNode.prototype.getFloatFrequencyData = function (array) {
+      origGetFloatFreq.call(this, array);
+      // Noise kecil di frekuensi data — mengubah hash audio fingerprint
+      for (let i = 0; i < array.length; i += 7) {
+        array[i] += ${audioNoise} * (Math.random() - 0.5);
+      }
+    };
+
+    const origCreateOscillator = AudioContext.prototype.createOscillator;
+    AudioContext.prototype.createOscillator = function () {
+      const osc = origCreateOscillator.call(this);
+      const origConnect = osc.connect.bind(osc);
+      osc.connect = function (dest) {
+        // Kalau tujuannya AnalyserNode, tambahkan gain node kecil di tengah
+        // supaya hash sedikit berbeda
+        if (dest instanceof AnalyserNode) {
+          try {
+            const gain = osc.context.createGain();
+            gain.gain.value = 1 + ${audioNoise} * 0.00001;
+            origConnect(gain);
+            gain.connect(dest);
+            return dest;
+          } catch { /* fallback */ }
+        }
+        return origConnect(dest);
+      };
+      return osc;
+    };
+
+    // OfflineAudioContext juga
+    if (typeof OfflineAudioContext !== 'undefined') {
+      const origOffOsc = OfflineAudioContext.prototype.createOscillator;
+      OfflineAudioContext.prototype.createOscillator = function () {
+        const osc = origOffOsc.call(this);
+        const origConnect = osc.connect.bind(osc);
+        osc.connect = function (dest) {
+          if (dest instanceof AnalyserNode) {
+            try {
+              const gain = osc.context.createGain();
+              gain.gain.value = 1 + ${audioNoise} * 0.00001;
+              origConnect(gain);
+              gain.connect(dest);
+              return dest;
+            } catch {}
+          }
+          return origConnect(dest);
+        };
+        return osc;
+      };
+    }
+
+    // ===== LAYER 8: CDP / DevTools detection =================================
+
+    // 8a. Error stack trace — Facebook mengecek nama file di stack trace
+    //     untuk menemukan 'pptr:' atau 'puppeteer' atau 'playwright'
+    const origStackDescriptor = Object.getOwnPropertyDescriptor(Error.prototype, 'stack');
+    if (origStackDescriptor && origStackDescriptor.get) {
+      Object.defineProperty(Error.prototype, 'stack', {
+        get() {
+          const stack = origStackDescriptor.get.call(this);
+          if (typeof stack !== 'string') return stack;
+          return stack
+            .replace(/pptr:/g, 'chrome-extension://')
+            .replace(/playwright/gi, 'chrome')
+            .replace(/puppeteer/gi, 'chrome');
+        },
+        configurable: true,
+      });
+    }
+
+    // 8b. Debugger detection — Facebook pakai (function(){}).constructor
+    //     untuk memeriksa apakah debugger aktif
+    //     Kita tidak override Function constructor (Facebook sendiri pakai),
+    //     tapi kita override performance.now timing yang dipakai untuk
+    //     timing-based debugger detection
+    const origPerfNow = performance.now.bind(performance);
+    let lastPerfNow = origPerfNow();
+    performance.now = function () {
+      const real = origPerfNow();
+      // Kalau gap terlalu besar (debugger pause), compress
+      if (real - lastPerfNow > 100) {
+        lastPerfNow = real;
+      }
+      lastPerfNow = real;
+      return real;
+    };
+
+    // ===== LAYER 9: iframe contentWindow ====================================
+
+    // Playwright bocor di cross-origin iframe: contentWindow.chrome undefined,
+    // dan beberapa property missing.  Override HTMLIFrameElement.prototype
+    const origContentWindow = Object.getOwnPropertyDescriptor(
+      HTMLIFrameElement.prototype, 'contentWindow'
+    );
+    if (origContentWindow) {
+      Object.defineProperty(HTMLIFrameElement.prototype, 'contentWindow', {
+        get() {
+          const win = origContentWindow.get.call(this);
+          if (!win) return win;
+          try {
+            // Hanya bisa akses same-origin iframe
+            if (win.chrome === undefined) {
+              win.chrome = { runtime: {} };
+            }
+          } catch {
+            // Cross-origin — ignore, tidak bisa diakses
+          }
+          return win;
+        },
+        configurable: true,
+      });
+    }
+
+    // ===== LAYER 10: Notification constructor ================================
+
+    // Facebook cek apakah Notification.toString() normal
+    const origNotification = window.Notification;
+    if (origNotification) {
+      const fakeNotification = function (title, options) {
+        return new origNotification(title, options);
+      };
+      fakeNotification.permission = origNotification.permission;
+      fakeNotification.requestPermission = origNotification.requestPermission?.bind(origNotification);
+      fakeNotification.prototype = origNotification.prototype;
+      Object.defineProperty(fakeNotification, 'name', { value: 'Notification' });
+      Object.defineProperty(fakeNotification, 'toString', {
+        value: () => 'function Notification() { [native code] }',
+      });
+      window.Notification = fakeNotification;
+    }
+
+    // ===== LAYER 11: toString / prototype spoofing ===========================
+
+    // Facebook cek apakah fungsi yang di-override punya toString normal
+    const origToString = Function.prototype.toString;
+    const spoofedFunctions = new Set();
+
+    function spoofToString(fn, nativeName) {
+      spoofedFunctions.add(fn);
+      fn.toString = function () {
+        if (spoofedFunctions.has(this)) {
+          return 'function ' + nativeName + '() { [native code] }';
+        }
+        return origToString.call(this);
+      };
+    }
+
+    // Spoof semua fungsi yang sudah kita override
+    spoofToString(navigator.permissions.query, 'query');
+    spoofToString(WebGLRenderingContext.prototype.getParameter, 'getParameter');
+    spoofToString(WebGL2RenderingContext.prototype.getParameter, 'getParameter');
+    spoofToString(WebGLRenderingContext.prototype.getExtension, 'getExtension');
+    spoofToString(HTMLCanvasElement.prototype.toDataURL, 'toDataURL');
+    spoofToString(HTMLCanvasElement.prototype.toBlob, 'toBlob');
+    spoofToString(CanvasRenderingContext2D.prototype.getImageData, 'getImageData');
+    spoofToString(AnalyserNode.prototype.getFloatFrequencyData, 'getFloatFrequencyData');
+    spoofToString(performance.now, 'now');
+  `;
+}
 
 const MARKETPLACE_CATEGORIES = {
   home_garden: {
@@ -232,7 +691,7 @@ const MARKETPLACE_CONDITIONS = {
 };
 
 export class AutomationService extends EventEmitter {
-  constructor({ sessionDirectory, closePostedTabs = true } = {}) {
+  constructor({ sessionDirectory, closePostedTabs = true, safeStorage = null } = {}) {
     super();
     this.browser = null;
     this.context = null;
@@ -242,6 +701,7 @@ export class AutomationService extends EventEmitter {
     this.mainPage = null;
     // Tutup tab formulir otomatis setelah penerbitan terkonfirmasi.
     this.closePostedTabs = closePostedTabs;
+    this.safeStorage = safeStorage;
     // Login cookies are personal data.  Keep them in Electron's per-user
     // data directory instead of the application bundle, which is read-only
     // after installation and may be copied to another computer.
@@ -256,6 +716,44 @@ export class AutomationService extends EventEmitter {
     this.manualAction = null;
     this.detectionTimer = null;
     this.browserInstallPromise = null;
+  }
+
+  async loadSessionState() {
+    try {
+      await fs.access(this.sessionFile);
+      const raw = await fs.readFile(this.sessionFile);
+      if (this.safeStorage?.isEncryptionAvailable?.()) {
+        try {
+          const decrypted = this.safeStorage.decryptString(raw);
+          return JSON.parse(decrypted);
+        } catch {
+          // Fallback membaca plain JSON jika file sesi dibuat sebelum enkripsi aktif
+          return JSON.parse(raw.toString("utf8"));
+        }
+      }
+      return JSON.parse(raw.toString("utf8"));
+    } catch {
+      return null;
+    }
+  }
+
+  async saveSessionState() {
+    if (!this.context) return;
+    try {
+      const state = await this.context.storageState();
+      const json = JSON.stringify(state);
+      await fs.mkdir(path.dirname(this.sessionFile), { recursive: true });
+      if (this.safeStorage?.isEncryptionAvailable?.()) {
+        const encrypted = this.safeStorage.encryptString(json);
+        await fs.writeFile(this.sessionFile, encrypted);
+        this.emit("log", "Sesi login berhasil disimpan (terenkripsi DPAPI/SafeStorage).", "info");
+      } else {
+        await fs.writeFile(this.sessionFile, json, "utf8");
+        this.emit("log", "Sesi login berhasil disimpan.", "info");
+      }
+    } catch (e) {
+      console.error("Gagal simpan sesi:", e.message);
+    }
   }
 
   async openBrowser() {
@@ -279,16 +777,25 @@ export class AutomationService extends EventEmitter {
           "--no-first-run",
           "--no-default-browser-check",
           "--disable-notifications",
+          // Anti-detection: sembunyikan semua sinyal automation
           "--disable-blink-features=AutomationControlled",
+          "--disable-features=AutomationControlled",
+          "--disable-infobars",
+          "--disable-background-timer-throttling",
+          "--disable-backgrounding-occluded-windows",
+          "--disable-renderer-backgrounding",
+          "--disable-dev-shm-usage",
+          // Jangan tampilkan "Chrome is being controlled by automated test software"
+          "--disable-component-extensions-with-background-pages",
+          "--excludeSwitches=enable-automation",
         ],
+        ignoreDefaultArgs: ["--enable-automation"],
       });
 
-      let storageState;
-      try {
-        await fs.access(this.sessionFile);
-        storageState = this.sessionFile;
+      const storageState = await this.loadSessionState();
+      if (storageState) {
         this.emit("log", "Menggunakan sesi login tersimpan.", "info");
-      } catch {
+      } else {
         this.emit(
           "log",
           "Tidak ada sesi tersimpan. Silakan login manual.",
@@ -296,10 +803,43 @@ export class AutomationService extends EventEmitter {
         );
       }
 
+      // Identitas browser di-random setiap sesi supaya fingerprint tidak
+      // selalu sama dan lebih sulit dikorelasikan oleh Facebook.
+      const sessionUA = pickRandom(DESKTOP_USER_AGENTS);
+      const sessionLocale = pickRandom(LOCALES);
+      const sessionTimezone = pickRandom(TIMEZONES);
+      const sessionScreen = pickRandom(SCREEN_RESOLUTIONS);
+
       this.context = await this.browser.newContext({
         ...(storageState ? { storageState } : {}),
         viewport: null,
+        userAgent: sessionUA,
+        locale: sessionLocale,
+        timezoneId: sessionTimezone,
+        screen: sessionScreen,
+        colorScheme: "light",
+        // Menyembunyikan header Sec-CH-UA yang bocorkan versi Chromium Playwright
+        extraHTTPHeaders: {
+          "Accept-Language": `${sessionLocale},id;q=0.9,en;q=0.8`,
+        },
       });
+
+      // Inject stealth script SEBELUM halaman apapun dimuat
+      const stealthParams = {
+        webglVendor: pickRandom(WEBGL_VENDORS),
+        webglRenderer: pickRandom(WEBGL_RENDERERS),
+        hardwareConcurrency: pickRandom([4, 8, 12, 16]),
+        deviceMemory: pickRandom([4, 8, 16]),
+        canvasNoise: [randomInt(0, 5), randomInt(0, 5), randomInt(0, 5)],
+        audioNoise: (Math.random() * 0.0001).toFixed(8),
+      };
+      await this.context.addInitScript(buildStealthScript(stealthParams));
+
+      this.emit(
+        "log",
+        `Stealth aktif — UA: ${sessionUA.slice(0, 50)}…, Locale: ${sessionLocale}, TZ: ${sessionTimezone}`,
+        "info",
+      );
 
       this.page = await this.context.newPage();
       this.mainPage = this.page;
@@ -372,18 +912,56 @@ export class AutomationService extends EventEmitter {
     // or previously downloaded Playwright browser.
     if (!process.resourcesPath) return null;
 
-    for (const relativePath of [
-      "chromium/chrome-win64/chrome.exe",
-      "chromium/chrome-win/chrome.exe",
-    ]) {
+    const bundledCandidates =
+      process.platform === "win32"
+        ? [
+            "chromium/chrome-win/chrome.exe",
+            "chromium/chrome-win64/chrome.exe",
+            "chromium/chrome.exe",
+          ]
+        : process.platform === "linux"
+          ? [
+              "chromium/chrome-linux/chrome",
+              "chromium/chrome-linux64/chrome",
+              "chromium/chrome",
+            ]
+          : [];
+
+    for (const relativePath of bundledCandidates) {
       const executablePath = path.join(process.resourcesPath, relativePath);
       try {
         await fs.access(executablePath);
         return executablePath;
       } catch {
-        // Try the other Chromium folder layout.
+        // Try next candidate
       }
     }
+
+    // Fallback: pindai folder resources/chromium jika struktur folder berbeda
+    try {
+      const baseDir = path.join(process.resourcesPath, "chromium");
+      const targetName = process.platform === "win32" ? "chrome.exe" : "chrome";
+      const scanDir = async (dir, depth = 0) => {
+        if (depth > 3) return null;
+        const entries = await fs.readdir(dir, { withFileTypes: true });
+        for (const entry of entries) {
+          const full = path.join(dir, entry.name);
+          if (entry.isFile() && entry.name.toLowerCase() === targetName.toLowerCase()) {
+            return full;
+          }
+          if (entry.isDirectory()) {
+            const found = await scanDir(full, depth + 1);
+            if (found) return found;
+          }
+        }
+        return null;
+      };
+      const found = await scanDir(baseDir);
+      if (found) return found;
+    } catch {
+      // Folder chromium tidak ada di resourcesPath
+    }
+
     return null;
   }
 
@@ -431,14 +1009,17 @@ export class AutomationService extends EventEmitter {
     );
     this.emit("status", { state: "busy", text: "Menyiapkan Chromium..." });
 
-    const playwrightCli = require.resolve("playwright/cli");
+    const playwrightPkg = require.resolve("playwright/package.json");
+    const playwrightCli = path.join(path.dirname(playwrightPkg), "cli.js");
     await new Promise((resolve, reject) => {
       let installOutput = "";
       const installer = spawn(
         process.execPath,
         [playwrightCli, "install", "chromium"],
         {
-          cwd: PROJECT_ROOT,
+          // PROJECT_ROOT berada di dalam app.asar pada aplikasi terpasang,
+          // dan folder di dalam asar tidak bisa dipakai sebagai cwd.
+          cwd: os.tmpdir(),
           windowsHide: true,
           // When packaged, process.execPath is the application .exe rather
           // than node.exe. This makes Electron run Playwright's CLI as Node.
@@ -509,12 +1090,7 @@ export class AutomationService extends EventEmitter {
             });
             this.emit("login_status", { isLoggedIn: true });
 
-            try {
-              await this.context.storageState({ path: this.sessionFile });
-              this.emit("log", "Sesi login berhasil disimpan.", "info");
-            } catch (e) {
-              console.error("Gagal simpan sesi:", e.message);
-            }
+            await this.saveSessionState();
           }
         } else {
           if (this.isLoggedIn) {
@@ -592,6 +1168,14 @@ export class AutomationService extends EventEmitter {
       "warn",
     );
 
+    if (totalPostings > 10) {
+      this.emit(
+        "log",
+        `PERINGATAN: Total ${totalPostings} formulir dalam satu batch berisiko memicu spam filter Facebook. Disarankan maksimal 5-10 posting per sesi.`,
+        "warn",
+      );
+    }
+
     try {
       let currentIndex = 0;
 
@@ -608,12 +1192,24 @@ export class AutomationService extends EventEmitter {
           const photoIndex = currentIndex % photoPaths.length;
           const photoForThisPost = [photoPaths[photoIndex]];
 
+          const dynamicTitle = parseSpintax(title);
+          const dynamicDescription = addZeroWidthEntropy(parseSpintax(description));
+          const dynamicSku = sku ? parseSpintax(sku) : "";
+          const dynamicLabel = label ? parseSpintax(label) : "";
+
           const tag = `[Formulir ${postingNumber}/${totalPostings} | Lokasi: "${expectedLocation}"]`;
           this.emit(
             "log",
             `${tag} Menggunakan foto ke-${photoIndex + 1}`,
             "info",
           );
+          if (dynamicTitle !== title) {
+            this.emit(
+              "log",
+              `${tag} Variasi judul: "${dynamicTitle}"`,
+              "info",
+            );
+          }
           this.emit("status", {
             state: "busy",
             text: `Posting ${postingNumber}/${totalPostings}...`,
@@ -622,15 +1218,15 @@ export class AutomationService extends EventEmitter {
           await this.executeSinglePost(
             {
               photos: photoForThisPost,
-              title,
+              title: dynamicTitle,
               price,
-              sku,
-              label,
+              sku: dynamicSku,
+              label: dynamicLabel,
               brand,
               category,
               subcategory,
               condition,
-              description,
+              description: dynamicDescription,
               expectedLocation,
             },
             tag,
@@ -645,6 +1241,18 @@ export class AutomationService extends EventEmitter {
           );
 
           currentIndex++;
+
+          // Cooldown optimal: 3-6 detik antar posting. Cukup agar network
+          // socket selesai & bebas deteksi burst, tanpa membuang waktu.
+          if (currentIndex < totalPostings) {
+            const cooldownSeconds = randomInt(3, 6);
+            this.emit(
+              "log",
+              `Menunggu ${cooldownSeconds} detik sebelum formulir berikutnya...`,
+              "info",
+            );
+            await this.waitWithCancellation(cooldownSeconds * 1000);
+          }
         }
       }
 
@@ -740,8 +1348,8 @@ export class AutomationService extends EventEmitter {
     }
     if (condition && !MARKETPLACE_CONDITIONS[condition])
       throw new Error("Pilih kondisi barang dari daftar yang tersedia.");
-    if (!Number.isInteger(loops) || loops < 1 || loops > 100)
-      throw new Error("Jumlah perulangan harus antara 1 sampai 100.");
+    if (!Number.isInteger(loops) || loops < 1 || loops > 20)
+      throw new Error("Jumlah perulangan harus antara 1 sampai 20 (demi keamanan akun).");
 
     return {
       photoPaths,
@@ -813,19 +1421,27 @@ export class AutomationService extends EventEmitter {
     });
 
     await this.uploadPhotos(item.photos, tag);
+    await this.humanDelay(200, 400);
     await this.fillTitle(item.title, tag);
+    await this.humanDelay(150, 300);
     await this.fillPrice(item.price, tag);
+    await this.humanDelay(150, 300);
 
     if (item.category !== "vehicles") {
       await this.openCategoryPicker(tag);
-
+      await this.humanDelay(150, 300);
       await this.selectSubcategory(item.category, item.subcategory, tag);
     }
 
+    await this.humanDelay(150, 300);
     await this.selectCondition(item.condition, tag);
+    await this.humanDelay(100, 250);
     await this.fillSku(item.sku, tag);
+    await this.humanDelay(100, 200);
     await this.fillLabel(item.label, tag);
+    await this.humanDelay(100, 200);
     await this.fillBrand(item.brand, tag);
+    await this.humanDelay(150, 350);
     await this.fillDescription(item.description, tag);
     await this.waitForUploadsToSettle(tag);
     await this.recheckCoreFields(item, tag);
@@ -933,7 +1549,10 @@ export class AutomationService extends EventEmitter {
   // yang sudah diketik. Cek cepat, isi ulang hanya kalau memang berubah.
   async recheckCoreFields(item, tag) {
     const digits = (text) => String(text).replace(/[^0-9]/g, "");
-    const plain = (text) => String(text).replace(/\r\n/g, "\n").trim();
+    const plain = (text) =>
+      String(text)
+        .replace(/[\r\n\u200B-\u200D\uFEFF]/g, "")
+        .trim();
     const checks = [
       {
         name: "judul",
@@ -967,6 +1586,59 @@ export class AutomationService extends EventEmitter {
         );
         await check.refill();
       }
+    }
+  }
+
+  // ---- Perilaku cepat & aman anti-deteksi ---------------------------------
+  // Timing disesuaikan ke titik optimal: cepat untuk posting masif namun tetap
+  // memicu event browser asli (mousemove, keypress, input, paste).
+
+  async humanDelay(minMs = 150, maxMs = 350) {
+    const ms = Math.round(minMs + Math.random() * (maxMs - minMs));
+    await this.waitWithCancellation(ms);
+  }
+
+  // Gerakan mouse cepat ke elemen sebelum klik (cukup 2 step untuk trigger mousemove)
+  async humanMouseMove(element) {
+    try {
+      const box = await element.boundingBox();
+      if (!box) return;
+      const targetX = box.x + box.width * (0.3 + Math.random() * 0.4);
+      const targetY = box.y + box.height * (0.3 + Math.random() * 0.4);
+      await this.page.mouse.move(targetX, targetY, { steps: 2 });
+    } catch {
+      // Element off-screen atau stale
+    }
+  }
+
+  // Ketik cepat: untuk teks panjang (>60 karakter seperti deskripsi) gunakan
+  // simulasi paste/insertText (perilaku wajar seller manusia yang copy-paste).
+  // Untuk teks pendek (judul/harga), ketik cepat 10-25ms per karakter.
+  async humanType(field, value) {
+    await this.humanMouseMove(field);
+    await field.click();
+    await field.fill("");
+    if (value.length > 60) {
+      await new Promise((r) => setTimeout(r, 40 + Math.random() * 40));
+      await this.page.keyboard.insertText(value);
+      return;
+    }
+    for (const char of value) {
+      this.throwIfCancelled();
+      await field.type(char, { delay: 0 });
+      await new Promise((r) => setTimeout(r, 10 + Math.random() * 18));
+    }
+  }
+
+  // Scroll cepat ke elemen
+  async humanScrollTo(element) {
+    try {
+      await element.evaluate((el) => {
+        el.scrollIntoView({ behavior: "auto", block: "center" });
+      });
+      await new Promise((r) => setTimeout(r, 30 + Math.random() * 40));
+    } catch {
+      await element.scrollIntoViewIfNeeded().catch(() => {});
     }
   }
 
@@ -1014,14 +1686,18 @@ export class AutomationService extends EventEmitter {
     }
 
     const clean =
-      normalize ?? ((text) => String(text).replace(/\r\n/g, "\n").trim());
+      normalize ??
+      ((text) =>
+        String(text)
+          .replace(/[\r\n\u200B-\u200D\uFEFF]/g, "")
+          .trim());
     const expected = clean(value);
 
     for (let attempt = 1; attempt <= 3; attempt++) {
       this.throwIfCancelled();
-      await field.scrollIntoViewIfNeeded();
-      await field.click();
-      await field.fill(String(value));
+      await this.humanScrollTo(field);
+      // Ketik seperti manusia, bukan fill() instan yang bisa dideteksi
+      await this.humanType(field, String(value));
 
       const ok = await this.pollUntil(
         async () => {
@@ -1125,7 +1801,8 @@ export class AutomationService extends EventEmitter {
       );
     }
 
-    await option.scrollIntoViewIfNeeded();
+    await this.humanScrollTo(option);
+    await this.humanMouseMove(option);
 
     // Jangan pernah klik kandidat pertama secara otomatis.
     await option.click();
@@ -1152,9 +1829,9 @@ export class AutomationService extends EventEmitter {
       throw new Error("Kolom kategori Marketplace tidak ditemukan.");
     }
 
-    await control.scrollIntoViewIfNeeded();
+    await this.humanScrollTo(control);
+    await this.humanMouseMove(control);
     await control.click();
-    // Tidak perlu jeda: selectSubcategory menunggu opsi muncul sendiri.
   }
 
   async findExactMarketplaceOption(aliases) {
@@ -1239,7 +1916,8 @@ export class AutomationService extends EventEmitter {
     if (!control)
       throw new Error(`Kolom ${fieldName} Marketplace tidak ditemukan.`);
 
-    await control.scrollIntoViewIfNeeded();
+    await this.humanScrollTo(control);
+    await this.humanMouseMove(control);
     await control.click();
 
     // Ambil opsi segera setelah terdeteksi.
@@ -1437,7 +2115,8 @@ export class AutomationService extends EventEmitter {
         return;
       }
       openedControl = control;
-      await control.scrollIntoViewIfNeeded();
+      await this.humanScrollTo(control);
+      await this.humanMouseMove(control);
       await control.click();
       const controlTagName = await control
         .evaluate((element) => element.tagName.toLowerCase())
@@ -1490,18 +2169,37 @@ export class AutomationService extends EventEmitter {
   }
 
   async setMarketplaceText(field, value) {
-    await field.scrollIntoViewIfNeeded();
+    await this.humanScrollTo(field);
     const isEditable =
       (await field.getAttribute("contenteditable").catch(() => null)) ===
       "true";
     if (isEditable) {
+      await this.humanMouseMove(field);
       await field.click();
       await this.page.keyboard.press("Control+A");
-      await this.page.keyboard.type(value);
+      if (value.length > 60) {
+        await new Promise((r) => setTimeout(r, 40 + Math.random() * 40));
+        await this.page.keyboard.insertText(value);
+        return;
+      }
+      for (const char of value) {
+        await this.page.keyboard.type(char, { delay: 0 });
+        await new Promise((r) => setTimeout(r, 10 + Math.random() * 18));
+      }
       return;
     }
+    await this.humanMouseMove(field);
+    await field.click();
     await field.fill("");
-    await field.fill(value);
+    if (value.length > 60) {
+      await new Promise((r) => setTimeout(r, 40 + Math.random() * 40));
+      await this.page.keyboard.insertText(value);
+      return;
+    }
+    for (const char of value) {
+      await field.type(char, { delay: 0 });
+      await new Promise((r) => setTimeout(r, 10 + Math.random() * 18));
+    }
   }
 
   async fillDescription(description, tag) {

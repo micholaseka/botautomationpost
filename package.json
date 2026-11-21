@@ -6,12 +6,15 @@
   "type": "module",
   "scripts": {
     "start": "electron .",
-    "build": "electron-builder --publish never"
+    "prepare:chromium": "node scripts/prepare-chromium.mjs",
+    "build": "electron-builder --publish never",
+    "dist:win": "npm run prepare:chromium && electron-builder --win nsis --x64 --publish never",
+    "dist:linux": "npm run prepare:chromium && electron-builder --linux deb rpm --x64 --publish never"
   },
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "playwright": "^1.62.0"
+    "playwright": "^1.64.1"
   },
   "devDependencies": {
     "electron": "^43.2.0",
@@ -22,9 +25,17 @@
     "productName": "Marketplace AutoPost Bot",
     "executableName": "MarketplaceAutoPostBot",
     "asar": true,
+    "files": [
+      "desktop/**/*",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "node_modules/playwright/**",
+      "node_modules/playwright-core/**"
+    ],
     "extraResources": [
       {
-        "from": "node_modules/playwright-core/.local-browsers/chromium-1234",
+        "from": "vendor/chromium",
         "to": "chromium"
       }
     ],
@@ -50,13 +61,8 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "Marketplace AutoPost Bot"
+      "shortcutName": "Marketplace AutoPost Bot",
+      "artifactName": "${executableName}-Setup-${version}.${ext}"
     }
-  },
-  "files": [
-    "**/*",
-    "!dist{,/**/*}",
-    "!.git{,/**/*}",
-    "!**/*.log"
-  ]
+  }
 }

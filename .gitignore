@@ -1,5 +1,8 @@
 node_modules/
 dist/
+vendor/
+.codegraph/
+*.zip
 .env
 .env.*
 *.log

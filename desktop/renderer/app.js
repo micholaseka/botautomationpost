@@ -375,6 +375,11 @@ function validateListing() {
     return "Isi minimal satu lokasi target. Pisahkan dengan tanda /.";
   }
 
+  const loops = Number.parseInt(els.loops.value, 10);
+  if (Number.isNaN(loops) || loops < 1 || loops > 20) {
+    return "Jumlah putaran perulangan harus antara 1 sampai 20 (demi keamanan akun).";
+  }
+
   return "";
 }
 
